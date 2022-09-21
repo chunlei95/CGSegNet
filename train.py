@@ -13,9 +13,9 @@ from utils import valid, SearchBest
 
 args_parser = argparse.ArgumentParser()
 args_parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
-args_parser.add_argument('--te', type=int, default=150, help='total epoch')
+args_parser.add_argument('--te', type=int, default=50, help='total epoch')
 args_parser.add_argument('--ce', type=int, default=0, help='current epoch')
-args_parser.add_argument('--bs', type=int, default=16, help='batch size')
+args_parser.add_argument('--bs', type=int, default=2, help='batch size')
 args_parser.add_argument('--bw', type=float, default=0.8, help='weight of bce loss')
 args_parser.add_argument('--dw', type=float, default=0.2, help='weight of dice loss')
 args = args_parser.parse_args()
@@ -24,6 +24,7 @@ logger = get_logger('logs/v1.log')
 
 
 # todo 这一部分是一个很难的问题，流程怎么样一定要弄好
+# noinspection PyShadowingNames
 def pre_train(net, train_loader, criterion, optimizer, current_epoch, total_epoch, device):
     """自监督预训练
 
@@ -58,6 +59,7 @@ def pre_train(net, train_loader, criterion, optimizer, current_epoch, total_epoc
     pass
 
 
+# noinspection PyShadowingNames
 def train(net, train_loader, valid_loader, optimizer, criterion, current_epoch=0,
           total_epoch=100, device=None):
     """全监督方式
@@ -72,6 +74,8 @@ def train(net, train_loader, valid_loader, optimizer, criterion, current_epoch=0
     :param device:
     :return:
     """
+    net.to(device)
+    criterion.to(device)
     train_losses = []
     val_losses = []
     save_last = {}
@@ -80,14 +84,12 @@ def train(net, train_loader, valid_loader, optimizer, criterion, current_epoch=0
     for i in range(current_epoch, total_epoch):
         total_loss = 0.0
         search_best = SearchBest()
+        net.train()
         for index, (x, y) in enumerate(train_loader):
             x = x.to(device)
             y = y.to(device)
 
-            patch_embedding = PatchEmbedding()
-            x_patch_embed = patch_embedding(x)
-
-            segment_result = net(x, x_patch_embed)
+            segment_result = net(x)
             epoch_loss = criterion(segment_result, y)
             optimizer.zero_grad()
             # 梯度反向传播
@@ -116,9 +118,9 @@ def train(net, train_loader, valid_loader, optimizer, criterion, current_epoch=0
     save_last['last_epoch'] = total_epoch
     loss_history['train_loss_history'] = train_losses
     loss_history['val_loss_history'] = val_losses
-    torch.save(save_last, 'pretrained/v3/last.pth')
-    torch.save(save_best, 'pretrained/v3/best.pth')
-    torch.save(loss_history, 'pretrained/v3/loss_history.pth')
+    torch.save(save_last, 'pretrained/v1/last.pth')
+    torch.save(save_best, 'pretrained/v1/best.pth')
+    torch.save(loss_history, 'pretrained/v1/loss_history.pth')
 
 
 if __name__ == '__main__':
@@ -138,9 +140,10 @@ if __name__ == '__main__':
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,))
     ])
-    net = CGSegNet()
+    net = CGSegNet().to(device)
+    print(net)
     optimizer = optim.Adam(net.parameters(), lr=args.lr, betas=(0.5, 0.99))
-    criterion = nn.BCELoss()
+    criterion = nn.BCELoss().to(device)
     train_loader, val_loader = load_dataset('B', batch_size=args.bs, train_transforms=train_trans,
                                             test_transforms=val_trans)
     train(net, train_loader, val_loader, optimizer, criterion, total_epoch=args.te, current_epoch=args.ce,

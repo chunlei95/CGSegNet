@@ -5,6 +5,7 @@ from einops import rearrange
 from timm.models.layers import to_2tuple
 
 
+# noinspection PyTypeChecker
 class CGSegNet(nn.Module):
     """输入图像大小设置为256 x 256，16个patch，每个patch的大小为16 x 16
 
@@ -24,9 +25,11 @@ class CGSegNet(nn.Module):
         # self.dense_projection_head = DenseProjectionHead()
         self.fusion = CTFusion()
         self.conv1x1 = nn.Conv2d(base_channel, num_class, kernel_size=1)
+        self.patch_embedding = PatchEmbedding()
 
-    def forward(self, cnn_input, transformer_input):
-        cnn_results = self.cnn_encoder(cnn_input)
+    def forward(self, x):
+        cnn_results = self.cnn_encoder(x)
+        transformer_input = self.patch_embedding(x)
         transformer_results = self.transformer_encoder(transformer_input)
         fusion_results = self.fusion(cnn_results, transformer_results)
         decoder_result = self.gene_decoder(fusion_results[:len(fusion_results) - 1],
@@ -83,10 +86,10 @@ class TransformerEncoder(nn.Module):
             self.in_dims.append(in_dims // (2 ** i))
         # **************** 设置每一个transformer层的输出维度 ***************************************************************
         self.out_dims = []
-        for i in range(num_blocks - 1):
-            self.out_dims.append(out_dims * (2 ** (4 - i - 1)))
+        for i in range(num_blocks):
+            self.out_dims.append(out_dims * (2 ** (num_blocks - i - 1)))
         # **************************************************************************************************************
-        self.blocks = []
+        self.blocks = nn.ModuleList()
         for i in range(num_blocks):
             self.blocks.append(
                 TransformerBlock(self.in_dims[i], self.out_dims[i], heads, sub_sample, attn_drop, proj_drop,
@@ -95,12 +98,14 @@ class TransformerEncoder(nn.Module):
     def forward(self, x):
         layer_results = []
         for i in range(len(self.blocks)):
-            layer_results[i] = self.blocks[i](x)
+            x = self.blocks[i](x)
+            layer_results.append(self.blocks[i](x))
         # todo 每一层的输出结果都需要转换成2D形式(在fusion模块中进行，也可以在此处进行,可能需要用到每一层的dim值，因此在此处进行可能比较合适)
         # 暂时不需要处理上面的todo
         return layer_results
 
 
+# noinspection PyTypeChecker
 class TransformerBlock(nn.Module):
     """代码借鉴：https://github.com/yhygao/UTNet
         transformer块
@@ -120,16 +125,21 @@ class TransformerBlock(nn.Module):
                                        sub_sample=sub_sample, attn_drop=attn_drop, proj_drop=proj_drop,
                                        reduce_size=reduce_size, projection=projection, rel_pos=rel_pos)
 
-        self.bn2 = nn.BatchNorm2d(in_planes)
+        self.bn2 = nn.BatchNorm2d(out_planes)
         self.relu = nn.ReLU(inplace=True)
         self.mlp = nn.Conv2d(in_planes, in_planes, kernel_size=1, bias=False)
         # conv1x1 has no difference with mlp in performance
+        self.shortcut = nn.Sequential()
+        if in_planes != out_planes:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_planes, out_planes, kernel_size=1, bias=False)
+            )
 
     def forward(self, x):
         out = self.bn1(x)
         out, q_k_attn = self.attn(out)
 
-        out = out + x
+        out = out + self.shortcut(x)
         residue = out
 
         out = self.bn2(out)
@@ -141,7 +151,7 @@ class TransformerBlock(nn.Module):
         return out
 
 
-# noinspection PyPep8Naming
+# noinspection PyPep8Naming,SpellCheckingInspection
 class MultiHeadAttention(nn.Module):
     """代码借鉴：https://github.com/yhygao/UTNet
         多头注意力模块
@@ -220,7 +230,7 @@ class MultiHeadAttention(nn.Module):
         return out, q_k_attn
 
 
-# noinspection PyPep8Naming,SpellCheckingInspection
+# noinspection PyPep8Naming,SpellCheckingInspection,PyTypeChecker
 class depthwise_separable_conv(nn.Module):
     """代码借鉴：https://github.com/yhygao/UTNet
         深度可分离卷积
@@ -247,7 +257,7 @@ class PatchEmbedding(nn.Module):
     源代码中img_size=224, in_channel=3, embed_dim=768
     """
 
-    def __init__(self, img_size=256, patch_size=16, in_channel=1, embed_dim=16384):
+    def __init__(self, img_size=256, patch_size=16, in_channel=1, embed_dim=768):
         super(PatchEmbedding, self).__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
@@ -264,11 +274,12 @@ class PatchEmbedding(nn.Module):
         # FIXME look at relaxing size constraints
         # assert H == self.img_size[0] and W == self.img_size[1], \
         #    f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.proj(x).flatten(2).transpose(1, 2)
+        # x = self.proj(x).flatten(2).transpose(1, 2)
+        x = self.proj(x)
         return x
 
 
-# noinspection PyPep8Naming
+# noinspection PyPep8Naming,SpellCheckingInspection
 class RelativePositionEncoding(nn.Module):
     """代码借鉴：https://github.com/yhygao/UTNet
         相对位置编码
@@ -339,6 +350,7 @@ class FFN(nn.Module):
         return x
 
 
+# noinspection PyTypeChecker
 class CNNEncoder(nn.Module):
     """ 以CNN构建的编码器
     todo 此处代码需要进行大改，不然无法进行CNN和Transformer特征的多尺度融合(已修改)
@@ -351,23 +363,25 @@ class CNNEncoder(nn.Module):
     def __init__(self, in_channel, base_channel=64, num_blocks=4):
         super(CNNEncoder, self).__init__()
         # ******** 修改输入图像的通道到基础值 *******************************************************************************
-        self.change_channel = nn.Conv2d(in_channel, base_channel, kernel_size=1)
-        self.bn = nn.BatchNorm2d(base_channel)
-        self.relu = nn.ReLU(inplace=True)
+        # self.change_channel = nn.Conv2d(in_channel, base_channel, kernel_size=1)
+        # self.bn = nn.BatchNorm2d(base_channel)
+        # self.relu = nn.ReLU(inplace=True)
         # ******** 设置每一层的通道数 *************************************************************************************
         channels = []
-        for i in range(num_blocks):
+        for i in range(num_blocks + 1):
             channels.append(base_channel * (2 ** i))
         # ******** 构建transformer编码器（多个transformer块的堆叠）**********************************************************
-        self.blocks = [BasicEncoderBlock(channels[0], channels[1], channels[1], down_sample=True, kernel_size=2)]
+        print(channels)
+        self.blocks = nn.ModuleList(
+            [BasicEncoderBlock(in_channel, channels[0], channels[0], down_sample=False, kernel_size=2)])
         for i in range(num_blocks - 1):
-            self.blocks.append(BasicEncoderBlock(channels[i + 1], channels[i + 2], channels[i + 2]))
+            self.blocks.append(BasicEncoderBlock(channels[i], channels[i + 1], channels[i + 1]))
 
     def forward(self, x):
-        x = self.change_channel(x)
         layer_result = []
         for i in range(len(self.blocks)):
-            layer_result[i] = self.blocks[i](x)
+            x = self.blocks[i](x)
+            layer_result.append(x)
         return layer_result
 
 
@@ -412,6 +426,7 @@ class CTFusion(nn.Module):
         return fusion_result
 
 
+# noinspection PyTypeChecker
 class GeneDecoder(nn.Module):
     """生成分支的解码器
 
@@ -421,7 +436,7 @@ class GeneDecoder(nn.Module):
         super(GeneDecoder, self).__init__()
         self.num_class = num_class
         channels = []
-        for i in range(num_blocks):
+        for i in range(num_blocks + 1):
             mid_channels = in_channels // (2 ** i)
             assert mid_channels > 0
             channels.append(mid_channels)
@@ -441,6 +456,7 @@ class GeneDecoder(nn.Module):
         return x
 
 
+# noinspection PyTypeChecker
 class BasicDecoderBlock(nn.Module):
 
     def __init__(self, in_channel, mid_channel, out_channel, bottleneck=False, up_sample=True, factor=2):
@@ -468,14 +484,17 @@ class BasicDecoderBlock(nn.Module):
         return self.layers(x)
 
 
+# noinspection PyTypeChecker
 def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
 
+# noinspection PyTypeChecker
 def conv1x1(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=False)
 
 
+# noinspection PyTypeChecker
 class BasicBlock(nn.Module):
     """代码借鉴：https://github.com/yhygao/UTNet
         普通残差块
@@ -483,37 +502,36 @@ class BasicBlock(nn.Module):
 
     def __init__(self, in_planes, out_planes, stride=1):
         super(BasicBlock, self).__init__()
-        self.conv1 = conv3x3(in_planes, out_planes, stride)
-        self.bn1 = nn.BatchNorm2d(in_planes)
+        self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_planes)
         self.relu = nn.ReLU(inplace=True)
 
-        self.conv2 = conv3x3(out_planes, out_planes)
+        self.conv2 = nn.Conv2d(out_planes, out_planes, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_planes)
 
         self.shortcut = nn.Sequential()
         if stride != 1 or in_planes != out_planes:
             self.shortcut = nn.Sequential(
-                nn.BatchNorm2d(in_planes),
-                self.relu,
                 nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
             )
 
     def forward(self, x):
         residue = x
 
-        out = self.bn1(x)
+        out = self.conv1(x)
+        out = self.bn1(out)
         out = self.relu(out)
-        out = self.conv1(out)
 
-        out = self.bn2(out)
-        out = self.relu(out)
         out = self.conv2(out)
 
         out += self.shortcut(residue)
 
+        out = self.bn2(out)
+        out = self.relu(out)
         return out
 
 
+# noinspection PyTypeChecker
 class BottleneckBlock(nn.Module):
     """残差网络中的bottleneck block
 
@@ -535,7 +553,6 @@ class BottleneckBlock(nn.Module):
         if in_channel != out_channel or stride != 1:
             self.shortcut = nn.Sequential(
                 nn.Conv2d(in_channel, out_channel, kernel_size=1),
-                nn.BatchNorm2d(out_channel)
             )
         # **************************************************************************************************************
 
