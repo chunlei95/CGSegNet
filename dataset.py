@@ -1,10 +1,16 @@
+import os.path
 from glob import glob
 
 import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
+import torch
 from nibabel.viewers import OrthoSlicer3D
 from torch.utils.data import DataLoader, Dataset
+from PIL import Image
+import transforms
+import cv2
+import imageio
 
 
 class CT3DDataset(Dataset):
@@ -13,48 +19,93 @@ class CT3DDataset(Dataset):
     """
 
     # noinspection PyShadowingNames
-    def __init__(self, images, targets=None, transforms=None, train=True):
-        self.transforms = transforms
+    def __init__(self, images, targets=None, slices_path=None, transforms=None, train=True):
         self.image_slices = []
         self.target_slices = []
+        if slices_path is not None:
+            root_image_slice_path = slices_path + '/image/*'
+            root_target_slice_path = slices_path + '/mask/*'
+            self.image_slice_path = glob(root_image_slice_path)
+            self.target_slice_path = glob(root_target_slice_path)
+            self.image_slices = glob(root_image_slice_path)
+            self.target_slices = glob(root_target_slice_path)
+        self.transforms = transforms
         if targets is not None:
-            for image_path, target_path in zip(images, targets):
-                image_data = nib.load(image_path)
-                target_data = nib.load(target_path)
-                image = image_data.get_fdata()
-                target = target_data.get_fdata()
+            if len(self.image_slices) == 0 or len(self.target_slices) == 0:
+                for image_path, target_path in zip(images, targets):
 
-                # 只对训练集进行去除不包含肺部切片的处理
-                if train:
-                    image, target = remove_no_lung_slice(image, target)
+                    image_splits = image_path.split('\\')
+                    image_save_path = image_splits[0].rsplit('/', 1)[0] + '/slices/image/'
+                    if not os.path.exists(image_save_path):
+                        os.mkdir(image_save_path)
+                    image_save_path += image_splits[-1].split('.')[0]
 
-                # 对训练集和验证集同时进行去除不包含肺部切片的处理
-                # image, target = remove_no_lung_slice(image, target)
+                    mask_splits = target_path.split('\\')
+                    target_save_path = mask_splits[0].rsplit('/', 1)[0] + '/slices/mask/'
+                    if not os.path.exists(target_save_path):
+                        os.mkdir(target_save_path)
+                    target_save_path += mask_splits[-1].split('.')[0]
 
-                # 对训练集和验证集合都不进行去除不包含肺部切片的处理
+                    image_data = nib.load(image_path)
+                    target_data = nib.load(target_path)
+                    image = image_data.get_fdata()
+                    target = target_data.get_fdata()
 
-                image = image.astype('float32')
-                target = target.astype('float32')
+                    # 只对训练集进行去除不包含肺部切片的处理
+                    if train:
+                        image, target = remove_no_lung_slice(image, target)
 
-                slices = image.shape[-1]
-                for i in range(slices):
-                    self.image_slices.append(np.expand_dims(image[:, :, i], -1))
-                    self.target_slices.append(np.expand_dims(target[:, :, i], -1))
+                    # 对训练集和验证集同时进行去除不包含肺部切片的处理
+                    # image, target = remove_no_lung_slice(image, target)
+
+                    # 对训练集和验证集合都不进行去除不包含肺部切片的处理
+
+                    image = image.astype('float32')
+                    target = target.astype('float32')
+
+                    slices = image.shape[-1]
+                    for i in range(slices):
+                        image_name = image_save_path + '_' +str(i) + '.png'
+                        mask_name = target_save_path + '_' + str(i) + '.png'
+                        image_slice = np.expand_dims(image[:, :, i], -1)
+                        mask_slice = np.expand_dims(target[:, :, i], -1)
+                        # self.image_slices.append(image_slice)
+                        # self.target_slices.append(mask_slice)
+                        imageio.imwrite(image_name, image_slice)
+                        imageio.imwrite(mask_name, mask_slice)
+                        # plt.imsave(image_name, image_slice)
+                        # plt.imsave(mask_name, mask_slice)
+                        self.image_slices.append(image_name)
+                        self.target_slices.append(mask_name)
+
         else:
-            for image_path in images:
-                image_data = nib.load(image_path)
-                image = image_data.get_fdata()
-                slices = image.shape[-1]
-                for i in range(slices):
-                    self.image_slices.append(np.expand_dims(image[:, :, i], -1))
+            if len(self.image_slices) == 0:
+                for image_path in images:
 
+                    image_splits = image_path.split('\\')
+                    image_save_path = image_splits[0].rsplit('/', 1)[0] + '/slices/image/'
+                    if os.path.exists(image_save_path):
+                        os.mkdir(image_save_path)
+                    image_save_path += image_splits[-1].split('.')[0]
+
+                    image_data = nib.load(image_path)
+                    image = image_data.get_fdata()
+                    slices = image.shape[-1]
+                    for i in range(slices):
+                        image_name = image_save_path + '_' + str(i) + '.png'
+                        image_slice = np.expand_dims(image[:, :, i], -1)
+                        # self.image_slices.append(np.expand_dims(image[:, :, i], -1))
+                        imageio.imwrite(image_name, image_slice)
+                        # plt.imsave(image_name, image_slice)
+                        self.image_slices.append(image_name)
 
     def __getitem__(self, item):
-        assert len(self.image_slices) == len(self.target_slices)
-        image_slice = self.image_slices[item]
+        if len(self.target_slices) != 0:
+            assert len(self.image_slices) == len(self.target_slices)
+        image_slice = plt.imread(self.image_slices[item])
         target_slice = None
         if self.target_slices is not None:
-            target_slice = self.target_slices[item]
+            target_slice = plt.imread(self.target_slices[item])
         if self.transforms is not None:
             image_slice, target_slice = self.transforms(image_slice, target_slice)
         return image_slice, target_slice
@@ -191,7 +242,7 @@ def load_dataset(dataset_select='B', batch_size=1, train=True, train_transforms=
             target_paths.extend(glob('/home/ivan/Xiong/COVID-19-CT-Seg_20cases/Infection_Mask/*'))
             target_paths = get_relate_target(image_paths, target_paths, dataset='A')
         if dataset_select.find('B') != -1:
-            data_path = glob('/home/ivan/Xiong/COVID-19-20/COVID-19-20_v2/Train/*')
+            data_path = glob('D:/dataset/COVID-19-20/COVID-19-20_v2/Train/*')
             image_paths.extend([path for path in data_path if path.find('ct') != -1])
             target_paths.extend([path for path in data_path if path.find('seg') != -1])
             target_paths = get_relate_target(image_paths, target_paths, dataset='B')
@@ -228,11 +279,25 @@ def show_ct(path):
 
 
 if __name__ == '__main__':
-    image_path = '/home/ivan/Xiong/COVID-19-20/COVID-19-20_v2/Train/volume-covid19-A-0003_ct.nii.gz'
-    target_path = '/home/ivan/Xiong/COVID-19-20/COVID-19-20_v2/Train/volume-covid19-A-0003_seg.nii.gz'
-    image_data = nib.load(image_path)
-    target_data = nib.load(target_path)
-    image = image_data.get_fdata()
-    target = target_data.get_fdata()
-    image_, target_ = remove_no_lung_slice(image, target)
-    OrthoSlicer3D(target_).show()
+    image_path = 'D:/dataset/COVID-19-20/COVID-19-20_v2/Train/volume-covid19-A-0003_ct.nii.gz'
+    target_path = 'D:/dataset/COVID-19-20/COVID-19-20_v2/Train/volume-covid19-A-0003_seg.nii.gz'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    train_trans = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize(256),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(degrees=(0, 180)),
+        transforms.RandomCrop(256),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+    val_trans = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize(256),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+    # net = CGSegNet()
+    # optimizer = optim.Adam(net.parameters(), lr=args.lr, betas=(0.5, 0.99))
+    # criterion = nn.BCELoss()
+    train_loader, val_loader = load_dataset('B', batch_size=2, train_transforms=train_trans, test_transforms=val_trans)
