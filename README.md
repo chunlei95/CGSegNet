@@ -1,0 +1,5 @@
+# CGSegNet
+cnn和transformer双编码分支
+fusion融合cnn和transformer对应层的特征构成一个融合编码器
+融合编码器后接一个解码器
+不考虑transformer分支的话，无需fusion模块，剩下的就是一个u-net网络
