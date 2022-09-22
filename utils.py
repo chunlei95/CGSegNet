@@ -20,10 +20,11 @@ class SearchBest(object):
 
 
 # noinspection SpellCheckingInspection
-def valid(val_loader, net, criterions: list, criterion_weights: list = None, device=None):
-    if len(criterion_weights) == 0:
+def valid(val_loader, net, criterions: list, criterion_weights=None, device=None):
+    if criterion_weights is None:
+        criterion_weights = []
         for i in range(len(criterions)):
-            criterion_weights[i] = 1
+            criterion_weights.append(1)
     total_loss = 0.0
     # 前几次训练没有在验证的时候添加此段代码，导致训练结果严重不对经
     net.eval()

@@ -14,11 +14,11 @@ class CGSegNet(nn.Module):
     """
 
     def __init__(self, image_channel=1, base_channel=64, num_class=1, in_dim=1024, out_dim=1024, heads=4,
-                 num_blocks=4):
+                 num_blocks=5):
         super(CGSegNet, self).__init__()
         self.cnn_encoder = CNNEncoder(in_channel=image_channel, base_channel=base_channel, num_blocks=num_blocks)
         self.transformer_encoder = TransformerEncoder(in_dim, out_dim, heads, num_blocks=num_blocks)
-        self.gene_decoder = GeneDecoder(in_channels=base_channel * (2 ** num_blocks), num_class=num_class,
+        self.gene_decoder = GeneDecoder(in_channels=base_channel * (2 ** (num_blocks - 1)), num_class=num_class,
                                         num_blocks=num_blocks)
         # 目前考虑全监督方式，暂时不需要下面的映射头
         # self.global_projection_head = GlobalProjectionHead()
@@ -26,6 +26,7 @@ class CGSegNet(nn.Module):
         self.fusion = CTFusion()
         self.conv1x1 = nn.Conv2d(base_channel, num_class, kernel_size=1)
         self.patch_embedding = PatchEmbedding()
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         cnn_results = self.cnn_encoder(x)
@@ -34,7 +35,7 @@ class CGSegNet(nn.Module):
         fusion_results = self.fusion(cnn_results, transformer_results)
         decoder_result = self.gene_decoder(fusion_results[:len(fusion_results) - 1],
                                            fusion_results[len(fusion_results) - 1])
-        out = self.conv1x1(decoder_result)
+        out = self.sigmoid(self.conv1x1(decoder_result))
         return out
 
 
@@ -361,7 +362,7 @@ class CNNEncoder(nn.Module):
     :param num_blocks: CNN编码器重双卷积块（U-Net模型中的）的个数，与Transformer编码器中transformer的层数相同
     """
 
-    def __init__(self, in_channel, base_channel=64, num_blocks=4):
+    def __init__(self, in_channel, base_channel=64, num_blocks=5):
         super(CNNEncoder, self).__init__()
         # ******** 修改输入图像的通道到基础值 *******************************************************************************
         # self.change_channel = nn.Conv2d(in_channel, base_channel, kernel_size=1)
@@ -369,7 +370,7 @@ class CNNEncoder(nn.Module):
         # self.relu = nn.ReLU(inplace=True)
         # ******** 设置每一层的通道数 *************************************************************************************
         channels = []
-        for i in range(num_blocks + 1):
+        for i in range(num_blocks):
             channels.append(base_channel * (2 ** i))
         # ******** 构建transformer编码器（多个transformer块的堆叠）**********************************************************
         print(channels)
@@ -410,6 +411,7 @@ class BasicEncoderBlock(nn.Module):
         return self.layers(x)
 
 
+# noinspection PyTypeChecker
 class CTFusion(nn.Module):
     """CNN和transformer融合模块
 
@@ -430,7 +432,7 @@ class CTFusion(nn.Module):
             nn.Conv2d(64, 128, kernel_size=1, bias=False),
             nn.Conv2d(128, 256, kernel_size=1, bias=False),
             nn.Conv2d(256, 512, kernel_size=1, bias=False),
-            nn.Conv2d(512, 256, kernel_size=1, bias=False)
+            nn.Conv2d(512, 1024, kernel_size=1, bias=False)
         ])
 
     def forward(self, cnn_layer_results, transformer_layer_results):
@@ -438,7 +440,8 @@ class CTFusion(nn.Module):
         length = len(cnn_layer_results)
         fusion_result = []
         for i in range(length):
-            t_i = transformer_layer_results[i].view(-1, cnn_layer_results[i].shape[-2], cnn_layer_results[i].shape[-1])
+            t_i = transformer_layer_results[i].view(cnn_layer_results[i].shape[0], -1, cnn_layer_results[i].shape[-2],
+                                                    cnn_layer_results[i].shape[-1])
             if t_i.shape[1] != cnn_layer_results[i].shape[1]:
                 t_i = self.t_blocks[i](t_i)
             c_i = torch.zeros_like(t_i)
@@ -455,26 +458,29 @@ class GeneDecoder(nn.Module):
 
     """
 
-    def __init__(self, in_channels, num_class=1, num_blocks=4):
+    def __init__(self, in_channels, num_class=1, num_blocks=5):
         super(GeneDecoder, self).__init__()
         self.num_class = num_class
         channels = []
-        for i in range(num_blocks + 1):
+        for i in range(num_blocks):
             mid_channels = in_channels // (2 ** i)
             assert mid_channels > 0
             channels.append(mid_channels)
+
+        print(in_channels)
+        print(channels)
+
         blocks = []
-        for i in range(num_blocks):
+        for i in range(num_blocks - 1):
             blocks.append(
                 BasicDecoderBlock(channels[i], channels[i + 1], channels[i + 1], bottleneck=False, up_sample=True,
                                   factor=2))
-        blocks.append(nn.Conv2d(channels[num_blocks - 1], num_class, kernel_size=1))
+        # blocks.append(nn.Conv2d(channels[num_blocks - 1], num_class, kernel_size=1))
         # 注意，此处的分割结果没有进行bn + sigmoid/softmax ******************************************************************
         self.layers = nn.Sequential(*blocks)
 
     def forward(self, encoder_results, x):
-        assert len(encoder_results) == self.num_class
-        for i in range(encoder_results):
+        for i in range(len(encoder_results)):
             x = self.layers[i](encoder_results[len(encoder_results) - 1 - i], x)
         return x
 
@@ -484,9 +490,10 @@ class BasicDecoderBlock(nn.Module):
 
     def __init__(self, in_channel, mid_channel, out_channel, bottleneck=False, up_sample=True, factor=2):
         super(BasicDecoderBlock, self).__init__()
-        blocks = []
+        self.up_sample = None
         if up_sample:
-            blocks.append(nn.ConvTranspose2d(in_channel, mid_channel, kernel_size=factor))
+            self.up_sample = nn.ConvTranspose2d(in_channel, mid_channel, stride=factor, kernel_size=factor)
+        blocks = []
         if bottleneck:
             blocks.append(BottleneckBlock(in_channel, mid_channel))
             blocks.append(BottleneckBlock(mid_channel, out_channel))
@@ -498,6 +505,8 @@ class BasicDecoderBlock(nn.Module):
     def forward(self, x1, x2):
         # x1来自fusion模块，x2来自上一层的特征图，如果x1的形状与x2不相同，将x1转换成x2的形状
         # x1和x2的形状均为(N, C, H, W)
+        if self.up_sample is not None:
+            x2 = self.up_sample(x2)
         if x1.shape[-1] != x2.shape[-1]:
             # 对x1进行插值处理，使其与x2的形状相同
             x1 = F.interpolate(x1, x2.shape, mode='bilinear', align_corners=True)

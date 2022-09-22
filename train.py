@@ -13,9 +13,9 @@ from utils import valid, SearchBest
 
 args_parser = argparse.ArgumentParser()
 args_parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
-args_parser.add_argument('--te', type=int, default=50, help='total epoch')
+args_parser.add_argument('--te', type=int, default=150, help='total epoch')
 args_parser.add_argument('--ce', type=int, default=0, help='current epoch')
-args_parser.add_argument('--bs', type=int, default=2, help='batch size')
+args_parser.add_argument('--bs', type=int, default=8, help='batch size')
 args_parser.add_argument('--bw', type=float, default=0.8, help='weight of bce loss')
 args_parser.add_argument('--dw', type=float, default=0.2, help='weight of dice loss')
 args = args_parser.parse_args()
@@ -90,7 +90,7 @@ def train(net, train_loader, valid_loader, optimizer, criterion, current_epoch=0
             y = y.to(device)
 
             segment_result = net(x)
-            epoch_loss = criterion(segment_result, y)
+            epoch_loss = criterion(segment_result.squeeze(), y.to(torch.float32))
             optimizer.zero_grad()
             # 梯度反向传播
             epoch_loss.backward()
@@ -101,7 +101,7 @@ def train(net, train_loader, valid_loader, optimizer, criterion, current_epoch=0
             logger.info(
                 'Epoch {}: Batch {}/{} train loss = {:.4f}'.format(i + 1, index + 1, len(train_loader),
                                                                    epoch_loss.item()))
-        val_loss = valid(valid_loader, net, device)
+        val_loss = valid(valid_loader, net, criterions=[criterion], device=device)
         train_losses.append(total_loss / len(train_loader))
         val_losses.append(val_loss)
         logger.info('Epoch {}: train loss = {:.4f} val loss = {:.4f}'.format(i + 1, total_loss / len(train_loader),
