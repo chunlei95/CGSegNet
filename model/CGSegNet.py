@@ -13,7 +13,7 @@ class CGSegNet(nn.Module):
     :param out_dim: 整个transformer编码器的最终输出的维度
     """
 
-    def __init__(self, image_channel=1, base_channel=64, num_class=1, in_dim=16384, out_dim=1024, heads=4,
+    def __init__(self, image_channel=1, base_channel=64, num_class=1, in_dim=1024, out_dim=1024, heads=4,
                  num_blocks=4):
         super(CGSegNet, self).__init__()
         self.cnn_encoder = CNNEncoder(in_channel=image_channel, base_channel=base_channel, num_blocks=num_blocks)
@@ -83,11 +83,13 @@ class TransformerEncoder(nn.Module):
         # 如何处理多层transformer之间的维度变化，并使其能与CNN分支进行融合需要很巧妙的设计
         self.in_dims = []
         for i in range(num_blocks):
-            self.in_dims.append(in_dims // (2 ** i))
+            # self.in_dims.append(in_dims // (2 ** i))
+            self.in_dims.append(in_dims)
         # **************** 设置每一个transformer层的输出维度 ***************************************************************
         self.out_dims = []
         for i in range(num_blocks):
-            self.out_dims.append(out_dims * (2 ** (num_blocks - i - 1)))
+            # self.out_dims.append(out_dims * (2 ** (num_blocks - i - 1)))
+            self.out_dims.append(out_dims)
         # **************************************************************************************************************
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
@@ -120,7 +122,6 @@ class TransformerBlock(nn.Module):
         # todo 使用layer norm还是batch norm要看实验结果
         self.bn1 = nn.BatchNorm2d(in_planes)
         # **************************************************************************************************************
-
         self.attn = MultiHeadAttention(in_planes, out_planes, heads=heads, dim_head=in_planes // heads,
                                        sub_sample=sub_sample, attn_drop=attn_drop, proj_drop=proj_drop,
                                        reduce_size=reduce_size, projection=projection, rel_pos=rel_pos)
@@ -257,7 +258,7 @@ class PatchEmbedding(nn.Module):
     源代码中img_size=224, in_channel=3, embed_dim=768
     """
 
-    def __init__(self, img_size=256, patch_size=16, in_channel=1, embed_dim=768):
+    def __init__(self, img_size=256, patch_size=16, in_channel=1, embed_dim=1024):
         super(PatchEmbedding, self).__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
@@ -416,13 +417,35 @@ class CTFusion(nn.Module):
 
     def __init__(self):
         super(CTFusion, self).__init__()
-        # self.up_1 = F.interpolate()
+        self.t_blocks = nn.ModuleList([
+            nn.Conv2d(4, 64, kernel_size=1, bias=False),
+            nn.Conv2d(16, 128, kernel_size=1, bias=False),
+            nn.Conv2d(64, 256, kernel_size=1, bias=False),
+            nn.Conv2d(256, 512, kernel_size=1, bias=False)
+        ])
+
+        self.pool = nn.MaxPool2d(kernel_size=2)
+
+        self.c_blocks = nn.ModuleList([
+            nn.Conv2d(64, 128, kernel_size=1, bias=False),
+            nn.Conv2d(128, 256, kernel_size=1, bias=False),
+            nn.Conv2d(256, 512, kernel_size=1, bias=False),
+            nn.Conv2d(512, 256, kernel_size=1, bias=False)
+        ])
 
     def forward(self, cnn_layer_results, transformer_layer_results):
         assert len(cnn_layer_results) == len(transformer_layer_results)
+        length = len(cnn_layer_results)
         fusion_result = []
-        for i in range(len(cnn_layer_results)):
-            fusion_result.append(cnn_layer_results[i] + transformer_layer_results[i])
+        for i in range(length):
+            t_i = transformer_layer_results[i].view(-1, cnn_layer_results[i].shape[-2], cnn_layer_results[i].shape[-1])
+            if t_i.shape[1] != cnn_layer_results[i].shape[1]:
+                t_i = self.t_blocks[i](t_i)
+            c_i = torch.zeros_like(t_i)
+            if i != 0:
+                c_i = self.pool(self.c_blocks[i - 1](fusion_result[i - 1]))
+            f_i = t_i + c_i + cnn_layer_results[i]
+            fusion_result.append(f_i)
         return fusion_result
 
 
